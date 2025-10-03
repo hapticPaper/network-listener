@@ -202,22 +202,15 @@ def final_destination(route_attempt: str | None) -> tuple[str, int] | Any:
         '/rtfm/yours%20truly'
     ]
     other_sites = ['https://retirementplans.vanguard.com/', 'https://www.theonion.com/']
-    emojis = ["💩", "🍆", "☢", "☣", "🙅‍♂️", "🤏", "🖐", "🍯", "🥒", "🏳‍🌈", "🧯", 
+    emojis = ["💩", "☢", "☣", "🙅‍♂️", "🤏", "🖐", "🍯", "🥒",  "🧯", 
               "🤯", "🤬", "😡", "🤓", "👾", "🐱‍👤", "🐱‍🏍", "🙈", "⛏", "🔎", 
               "¯\\_(ツ)_/¯", "(T_T)"]
 
     match route_attempt:
-        case 'fuck':
-            logger.info("Redirecting to FOAAS", endpoint="fuck")
-            return redirect('https://www.foaas.com' + random.choice(foass_endpoints), 302)
         case 'emoji':
             emoji_choice = random.choice(emojis)
             logger.info("Returning emoji", emoji=emoji_choice)
             return (emoji_choice, 200)
-        case 'othersite':
-            site_choice = random.choice(other_sites)
-            logger.info("Redirecting to other site", site=site_choice)
-            return redirect(site_choice, 302)
         case 'showclientinfo':
             logger.info("Showing client info")
             return resp
@@ -225,11 +218,12 @@ def final_destination(route_attempt: str | None) -> tuple[str, int] | Any:
             logger.info("Showing IP statistics")
             return f"<h1>IP Statistics</h1><pre>{json.dumps(ip_stats, indent=2)}</pre>"
         case _:
-            response_type = random.choice(['foaas', 'emoji', 'redirect'])
+            response_type = random.choice(['stats', 'emoji'])
             logger.info("Random response", response_type=response_type)
             match response_type:
-                case 'foaas':
-                    return redirect('https://www.foaas.com' + random.choice(foass_endpoints), 302)
+                case 'stats':
+                    logger.info("Showing IP statistics")
+                    return f"<h1>IP Statistics</h1><pre>{json.dumps(ip_stats, indent=2)}</pre>"
                 case 'emoji':
                     return (random.choice(emojis), 200)
                 case 'redirect':
