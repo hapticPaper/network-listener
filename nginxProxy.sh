@@ -1,1 +1,1 @@
-nginx -c /mnt/c/Users/ian.rubenstein/sandbox/listener/nginxProxy.conf
+nginx -c nginxProxy.conf

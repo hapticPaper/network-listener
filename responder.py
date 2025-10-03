@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import datetime
+import json
 import logging
 import os
 import pprint
 import random
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, redirect, request
+import rich
+import structlog
+from flask import Flask, redirect, request, g
+from structlog.stdlib import LoggerFactory
 
 pp = pprint.PrettyPrinter(indent=4)
 
@@ -22,38 +27,117 @@ LOG_STORAGE = Path('./logs/requests')
 METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'LINK', 'VIEW', 
            'COPY', 'OPTIONS', 'UNLINK', 'PURGE', 'LOCK', 'UNLOCK', 'PROPFIND']
 
+# IP request counter
+ip_request_counts = defaultdict(int)
 
 def print_html(data: Any) -> str:
     """Convert data to HTML-safe formatted string."""
     return pp.pformat(data).replace("\n", "<br>").replace("'", '"')
 
-def setup_logging() -> logging.Logger:
-    """Set up logging configuration."""
-    st = int(time.time())
+def setup_structlog() -> structlog.stdlib.BoundLogger:
+    """Set up structlog configuration with Flask integration."""
+    # Ensure log directory exists
     LOG_STORAGE.mkdir(parents=True, exist_ok=True)
-    log_file = LOG_STORAGE / f"web_requests_{st}.log"
     
-    log_name = 'requestsLogger'
-    logger = logging.getLogger(log_name)
+    # Configure structlog
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.StackInfoRenderer(),
+            structlog.dev.set_exc_info,
+            structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S", utc=False),
+            structlog.dev.ConsoleRenderer(colors=True) if not LOG_TO_FILE else structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        logger_factory=LoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
     
-    if LOG_TO_FILE and not logger.hasHandlers():
-        log_file_handler = logging.FileHandler(log_file)
-        log_file_handler.setFormatter(logging.Formatter('%(message)s'))
-        log_file_handler.setLevel(1)
-        logger.addHandler(log_file_handler)
-        logger.parent.setLevel(0)
-    else:
-        logging.basicConfig(level=logging.INFO)
+    # Set up file handler if needed
+    if LOG_TO_FILE:
+        st = int(time.time())
+        log_file = LOG_STORAGE / f"web_requests_{st}.log"
+        
+        # Configure standard logging for file output
+        logging.basicConfig(
+            filename=str(log_file),
+            level=logging.INFO,
+            format="%(message)s",
+        )
     
-    logger.info(f"{datetime.datetime.now()} - {time.time()} - Logging has started")
+    logger = structlog.get_logger("network_listener")
+    logger.info("Structlog initialized", timestamp=time.time())
     return logger
 
+def get_client_ip() -> str:
+    """Extract client IP address, handling proxy headers."""
+    # Check for proxy added headers
+    if 'X-Forwarded-For' in request.headers:
+        # X-Forwarded-For can contain multiple IPs, take the first one
+        return request.headers['X-Forwarded-For'].split(',')[0].strip()
+    elif 'X-Real-IP' in request.headers:
+        return request.headers['X-Real-IP']
+    else:
+        return request.remote_addr or 'unknown'
+
+def get_ip_stats() -> dict:
+    """Get statistics about IP addresses."""
+    total_requests = sum(ip_request_counts.values())
+    return {
+        'total_unique_ips': len(ip_request_counts),
+        'total_requests': total_requests,
+        'ip_counts': dict(ip_request_counts),
+        'top_ips': sorted(ip_request_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+    }
+
 # Initialize logging and Flask app
-logger = setup_logging()
+logger = setup_structlog()
 app = Flask('simple_listener')
 
-logger.info(f"Flask started - {PHOST}:{PPORT}")
-logger.info("clientIP|unixtime|datetime|method|originalURL|userAgent|postPayload|host|path|requestParams|protocol|fullHeaderJSON")
+# Flask request logging middleware
+@app.before_request
+def log_request_info():
+    """Log request information and count requests per IP."""
+    client_ip = get_client_ip()
+    ip_request_counts[client_ip] += 1
+    
+    # Bind context for this request
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(
+        client_ip=client_ip,
+        method=request.method,
+        url=request.url,
+        user_agent=request.headers.get('User-Agent', ''),
+        request_count=ip_request_counts[client_ip],
+        timestamp=time.time(),
+        datetime=datetime.datetime.now().isoformat()
+    )
+    
+    logger.info(
+        "Request received",
+        client_ip=client_ip,
+        method=request.method,
+        path=request.path,
+        url=request.url,
+        user_agent=request.headers.get('User-Agent', ''),
+        request_count_for_ip=ip_request_counts[client_ip],
+        total_unique_ips=len(ip_request_counts),
+        headers=dict(request.headers)
+    )
+
+@app.after_request
+def log_response_info(response):
+    """Log response information."""
+    logger.info(
+        "Response sent",
+        status_code=response.status_code,
+        content_length=response.content_length
+    )
+    return response
+
+logger.info("Flask started", host=PHOST, port=PPORT)
+logger.info("Request logging initialized with IP counting")
 
 
 def final_destination(route_attempt: str | None) -> tuple[str, int] | Any:
@@ -61,45 +145,52 @@ def final_destination(route_attempt: str | None) -> tuple[str, int] | Any:
     # Make noise! - makes the console ding
     sys.stdout.write('\a')
     
+    client_ip = get_client_ip()
     ts = time.time()
     dt = datetime.datetime.now()
     req = request
-    headers = req.headers.environ
-    html_header = print_html(headers)
+    headers = dict(req.headers)
+    
+    # Get payload
     payload = ""
-    
-    # Check for proxy added headers
-    if 'HTTP_X_FORWARDED_FOR' in headers:
-        client_ip = headers['HTTP_REMOTE_ADDR']
-        client_port = headers['HTTP_CLIENT']
-        client_addr = headers['HTTP_CLIENT']
-    else: 
-        client_ip = headers['REMOTE_ADDR']
-        client_addr = f"{headers['REMOTE_ADDR']}:{headers['REMOTE_PORT']}"
-        
-    log_record = f"{client_ip}|{ts}|{dt}|{req.method}|{req.url}|{headers['HTTP_USER_AGENT']}|"
-    resp = f"{dt} EST  {ts}<br>{request.method}"
-    
-    resp += f" Request made from <b>{client_addr}</b> to {req.host}<b>{req.environ['RAW_URI']}</b><br>{headers['HTTP_USER_AGENT']} "
-    
-    # Handle payload
     if len(req.form) > 0:
         payload = print_html(dict(req.form))
     else:
         try:
-            payload = req.data.decode(req.charset)
+            payload = req.data.decode("utf8") if req.data else ""
         except Exception:
             payload = str(req.data)
+    
+    # Log the request details with structlog
+    logger.info(
+        "Processing request",
+        route_attempt=route_attempt,
+        payload=payload,
+        query_string=req.query_string.decode("utf8") if req.query_string else "",
+        host=req.host,
+        path=req.path,
+        protocol=req.environ.get('SERVER_PROTOCOL', ''),
+        full_url=req.url
+    )
+    
+    # Create response
+    resp = f"{dt} EST {ts}<br>{request.method}"
+    resp += f" Request made from <b>{client_ip}</b> (Request #{ip_request_counts[client_ip]}) to {req.host}<b>{req.path}</b><br>"
+    resp += f"{headers.get('User-Agent', 'Unknown User Agent')}"
     
     if payload:
         resp += f"<h2>Payload:</h2>{payload}"
         
-    log_record += f"{payload}|{req.host}|{req.path}|{req.query_string.decode(req.charset)}|{headers['SERVER_PROTOCOL']}|"
-    log_record += str(headers).replace("'", '"')
-    logger.info(log_record)
+    resp += f"<h2>IP Statistics:</h2>"
+    ip_stats = get_ip_stats()
+    resp += f"Total unique IPs: {ip_stats['total_unique_ips']}<br>"
+    resp += f"Total requests: {ip_stats['total_requests']}<br>"
+    resp += f"<h3>Top 10 IPs by request count:</h3>"
+    for ip, count in ip_stats['top_ips']:
+        resp += f"{ip}: {count} requests<br>"
     
-    print(f"{client_addr} requesting {req.host}{headers['RAW_URI']} at {ts}\t{dt}\t")
-    resp += f"<h2>Header:</h2> {html_header}"
+    print(f"{client_ip} (#{ip_request_counts[client_ip]}) requesting {req.host}{req.path} at {ts} {dt}")
+    resp += f"<h2>Headers:</h2> {print_html(headers)}"
 
     # Response strategies
     foass_endpoints = [
@@ -117,19 +208,32 @@ def final_destination(route_attempt: str | None) -> tuple[str, int] | Any:
 
     match route_attempt:
         case 'fuck':
+            logger.info("Redirecting to FOAAS", endpoint="fuck")
             return redirect('https://www.foaas.com' + random.choice(foass_endpoints), 302)
         case 'emoji':
-            return (random.choice(emojis), 200)
+            emoji_choice = random.choice(emojis)
+            logger.info("Returning emoji", emoji=emoji_choice)
+            return (emoji_choice, 200)
         case 'othersite':
-            return redirect(random.choice(other_sites), 302)
+            site_choice = random.choice(other_sites)
+            logger.info("Redirecting to other site", site=site_choice)
+            return redirect(site_choice, 302)
         case 'showclientinfo':
+            logger.info("Showing client info")
             return resp
+        case 'stats':
+            logger.info("Showing IP statistics")
+            return f"<h1>IP Statistics</h1><pre>{json.dumps(ip_stats, indent=2)}</pre>"
         case _:
-            return random.choice([
-                redirect('https://www.foaas.com' + random.choice(foass_endpoints), 302),
-                (random.choice(emojis), 200),
-                redirect(random.choice(other_sites), 302)
-            ])  
+            response_type = random.choice(['foaas', 'emoji', 'redirect'])
+            logger.info("Random response", response_type=response_type)
+            match response_type:
+                case 'foaas':
+                    return redirect('https://www.foaas.com' + random.choice(foass_endpoints), 302)
+                case 'emoji':
+                    return (random.choice(emojis), 200)
+                case 'redirect':
+                    return redirect(random.choice(other_sites), 302)  
 # Route handlers
 @app.route('/<route_attempt>', methods=METHODS)
 @app.route('/', methods=METHODS)

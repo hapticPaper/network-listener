@@ -1,2 +1,4 @@
 flask>=3.0.0
 gunicorn>=21.2.0
+structlog>=23.1.0
+rich>=13.5.0
