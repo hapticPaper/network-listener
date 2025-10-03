@@ -139,6 +139,10 @@ def log_response_info(response):
 logger.info("Flask started", host=PHOST, port=PPORT)
 logger.info("Request logging initialized with IP counting")
 
+def request_stats(ip_stats) -> str:
+    logger.info("Showing IP statistics")
+    return f"<h1>IP Statistics</h1><pre>{json.dumps(ip_stats, indent=2)}</pre>"
+
 
 def final_destination(route_attempt: str | None) -> tuple[str, int] | Any:
     """Handle all incoming requests with comprehensive logging."""
@@ -215,19 +219,18 @@ def final_destination(route_attempt: str | None) -> tuple[str, int] | Any:
             logger.info("Showing client info")
             return resp
         case 'stats':
-            logger.info("Showing IP statistics")
-            return f"<h1>IP Statistics</h1><pre>{json.dumps(ip_stats, indent=2)}</pre>"
+            return request_stats(ip_stats)
         case _:
-            response_type = random.choice(['stats', 'emoji'])
+            response_type = random.choice(['stats', 'emoji',"showclientinfo"])
             logger.info("Random response", response_type=response_type)
             match response_type:
                 case 'stats':
-                    logger.info("Showing IP statistics")
-                    return f"<h1>IP Statistics</h1><pre>{json.dumps(ip_stats, indent=2)}</pre>"
+                    return request_stats(ip_stats)
                 case 'emoji':
                     return (random.choice(emojis), 200)
-                case 'redirect':
-                    return redirect(random.choice(other_sites), 302)  
+                case 'showclientinfo':
+                    logger.info("Showing client info")
+                    return resp
 # Route handlers
 @app.route('/<route_attempt>', methods=METHODS)
 @app.route('/', methods=METHODS)
